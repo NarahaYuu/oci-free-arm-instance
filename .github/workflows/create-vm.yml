@@ -1,96 +1,546 @@
-name: Try to Create OCI VM
-# It will run every 5 minutes.
+name: OCI A1 Batam Capacity Catcher
+
+# Coba setiap 5 menit.
+# 2-57/5 menghindari menit 00 yang sering lebih ramai di GitHub Actions.
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  # Allows you to manually run this workflow from the Actions tab
+    - cron: "2-57/5 * * * *"
+
+  # Bisa dites manual dari tab Actions
   workflow_dispatch:
+
+# Dibutuhkan agar workflow bisa men-disable dirinya sendiri
+# setelah instance berhasil dibuat.
+permissions:
+  actions: write
+
+# Hindari dua attempt berjalan bersamaan.
+concurrency:
+  group: oci-a1-batam-catcher
+  cancel-in-progress: false
+
 env:
+  # OCI
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  IMAGE_ID: "ocid1.image.oc1.ap-singapore-1.aaaaaaaa5a3xwkk5vaichk47fms2uzvsqeriats2uorf6kwgq3l3nwrbhipa"
   SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: "KClJ:AP-SINGAPORE-1-AD-1"
-  OCI_CLI_REGION: "ap-singapore-1"
+
+  OCI_CLI_REGION: "ap-batam-1"
   OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
 
+  # Instance
+  INSTANCE_NAME: "nyuu"
+  SHAPE: "VM.Standard.A1.Flex"
+  OCPUS: "1"
+  MEMORY_GB: "4"
+  BOOT_VOLUME_GB: "50"
+
+  # Discord
+  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
 jobs:
-  build-and-deploy:
+  catch-a1:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Cache pip packages
-        id: cache-pip
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+
+      # ======================================================
+      # CACHE OCI CLI
+      # ======================================================
+
+      - name: Cache OCI CLI
+        id: cache-oci
         uses: actions/cache@v4
         with:
           path: ~/.local
-          key: ${{ runner.os }}-pip-oci-cli-v1
+          key: ${{ runner.os }}-python313-oci-cli-v1
 
-      - name: Add OCI CLI to path
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Setup OCI CLI and Try to Create VM
-        id: create_vm
-        # This forces the job to succeed so the cache will save.
-        continue-on-error: true 
+      - name: Add OCI CLI to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+
+      # ======================================================
+      # INSTALL OCI CLI HANYA JIKA BELUM ADA DI CACHE
+      # ======================================================
+
+      - name: Install OCI CLI
+        shell: bash
         run: |
-          set -o pipefail
+          set -e
 
-          pip install oci-cli
+          export PATH="$HOME/.local/bin:$PATH"
 
-          mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
-          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
-
-          # Run the command, capture ALL output, and use '|| true' to prevent the script from exiting early.
-          OCI_OUTPUT=$(oci compute instance launch \
-            --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "$AD_NAME" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-            --subnet-id "$SUBNET_ID" \
-            --image-id "$IMAGE_ID" \
-            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
-            --assign-public-ip true \
-            --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 200 2>&1 || true)
-
-          # Store the log as a GitHub step output
-          echo "log_data<<EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          # Check the log content for an error string.
-          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "Success! 'PROVISIONING' state found in output."
-            exit 0
+          if command -v oci >/dev/null 2>&1; then
+            echo "OCI CLI ditemukan dari cache."
+            oci --version
           else
-            echo "Error: Success string not found in OCI output. Failing the step."
-            exit 1
+            echo "OCI CLI belum ada. Installing..."
+            python -m pip install --user oci-cli
+            oci --version
           fi
 
-      - name: Send Discord Notification
-        if: always()
-        uses: sarisia/actions-status-discord@v1.15.4
-        with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
 
-            **Log Output:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
-            ```
+      # ======================================================
+      # SETUP OCI CONFIG
+      # ======================================================
+
+      - name: Configure OCI
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p ~/.oci
+
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" \
+            > ~/.oci/oci_api_key.pem
+
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_CLI_USER
+          tenancy=$OCI_CLI_TENANCY
+          fingerprint=$OCI_CLI_FINGERPRINT
+          key_file=$HOME/.oci/oci_api_key.pem
+          region=$OCI_CLI_REGION
+          EOF
+
+          printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" \
+            > /home/runner/oci_ssh_key.pub
+
+
+      # ======================================================
+      # VALIDASI AUTH
+      # ======================================================
+
+      - name: Validate OCI Authentication
+        shell: bash
+        run: |
+          set -e
+
+          oci iam availability-domain list \
+            --region "$OCI_CLI_REGION" \
+            --output json > /dev/null
+
+          echo "OCI authentication OK."
+
+
+      # ======================================================
+      # CATCH A1
+      # ======================================================
+
+      - name: Try to Create A1 VM
+        id: create_vm
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo ""
+          echo "=========================================="
+          echo "OCI A1 BATAM CAPACITY CATCHER"
+          echo "=========================================="
+          echo "Instance : $INSTANCE_NAME"
+          echo "Region   : $OCI_CLI_REGION"
+          echo "Shape    : $SHAPE"
+          echo "OCPU     : $OCPUS"
+          echo "RAM      : $MEMORY_GB GB"
+          echo "Boot     : $BOOT_VOLUME_GB GB"
+          echo ""
+
+
+          # ==================================================
+          # AMBIL AVAILABILITY DOMAIN OTOMATIS
+          # ==================================================
+
+          AD_JSON=$(oci iam availability-domain list \
+            --region "$OCI_CLI_REGION" \
+            --output json)
+
+          AD_NAME=$(echo "$AD_JSON" | jq -r '.data[0].name')
+
+          if [ -z "$AD_NAME" ] || [ "$AD_NAME" = "null" ]; then
+            echo "ERROR: Availability Domain tidak ditemukan."
+
+            echo "result=error" >> "$GITHUB_OUTPUT"
+            echo "stop_workflow=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+          echo "Availability Domain: $AD_NAME"
+
+
+          # ==================================================
+          # CEK APAKAH INSTANCE SUDAH ADA
+          # ==================================================
+
+          EXISTING_JSON=$(oci compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --region "$OCI_CLI_REGION" \
+            --display-name "$INSTANCE_NAME" \
+            --all \
+            --output json)
+
+          EXISTING_ID=$(echo "$EXISTING_JSON" | jq -r '
+            [
+              .data[]
+              | select(."lifecycle-state" != "TERMINATED")
+              | select(.id != null)
+            ]
+            | first
+            | .id // empty
+          ')
+
+          EXISTING_STATE=$(echo "$EXISTING_JSON" | jq -r '
+            [
+              .data[]
+              | select(."lifecycle-state" != "TERMINATED")
+              | select(.id != null)
+            ]
+            | first
+            | ."lifecycle-state" // empty
+          ')
+
+
+          if [ -n "$EXISTING_ID" ]; then
+
+            echo ""
+            echo "=========================================="
+            echo "INSTANCE SUDAH ADA"
+            echo "=========================================="
+            echo "OCID  : $EXISTING_ID"
+            echo "State : $EXISTING_STATE"
+
+            echo "result=exists" >> "$GITHUB_OUTPUT"
+            echo "stop_workflow=true" >> "$GITHUB_OUTPUT"
+            echo "instance_id=$EXISTING_ID" >> "$GITHUB_OUTPUT"
+            echo "instance_state=$EXISTING_STATE" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+
+          # ==================================================
+          # CARI UBUNTU 24.04 NORMAL ARM64 TERBARU
+          #
+          # BUKAN Ubuntu Minimal.
+          # ==================================================
+
+          echo ""
+          echo "Mencari Ubuntu 24.04 normal ARM64..."
+
+          IMAGE_JSON=$(oci compute image list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --region "$OCI_CLI_REGION" \
+            --shape "$SHAPE" \
+            --operating-system "Canonical Ubuntu" \
+            --operating-system-version "24.04" \
+            --all \
+            --output json)
+
+
+          IMAGE_ID=$(echo "$IMAGE_JSON" | jq -r '
+            [
+              .data[]
+              | select(
+                  ."display-name"
+                  | test("Canonical-Ubuntu-24\\.04.*aarch64")
+                )
+              | select(
+                  (."display-name" | test("Minimal"))
+                  | not
+                )
+            ]
+            | sort_by(."time-created")
+            | last
+            | .id // empty
+          ')
+
+
+          IMAGE_NAME=$(echo "$IMAGE_JSON" | jq -r '
+            [
+              .data[]
+              | select(
+                  ."display-name"
+                  | test("Canonical-Ubuntu-24\\.04.*aarch64")
+                )
+              | select(
+                  (."display-name" | test("Minimal"))
+                  | not
+                )
+            ]
+            | sort_by(."time-created")
+            | last
+            | ."display-name" // empty
+          ')
+
+
+          if [ -z "$IMAGE_ID" ]; then
+
+            echo "ERROR: Ubuntu 24.04 non-Minimal ARM64 tidak ditemukan."
+
+            echo "result=error" >> "$GITHUB_OUTPUT"
+            echo "stop_workflow=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+
+          echo "Image: $IMAGE_NAME"
+
+
+          # ==================================================
+          # SHAPE CONFIG
+          # ==================================================
+
+          cat > /tmp/shape-config.json <<EOF
+          {
+            "ocpus": $OCPUS,
+            "memoryInGBs": $MEMORY_GB
+          }
+          EOF
+
+
+          # ==================================================
+          # LAUNCH
+          # ==================================================
+
+          echo ""
+          echo "Mencoba launch instance..."
+
+
+          set +e
+
+          OCI_OUTPUT=$(oci compute instance launch \
+            --compartment-id "$COMPARTMENT_ID" \
+            --region "$OCI_CLI_REGION" \
+            --availability-domain "$AD_NAME" \
+            --shape "$SHAPE" \
+            --shape-config file:///tmp/shape-config.json \
+            --subnet-id "$SUBNET_ID" \
+            --image-id "$IMAGE_ID" \
+            --ssh-authorized-keys-file "/home/runner/oci_ssh_key.pub" \
+            --assign-public-ip true \
+            --display-name "$INSTANCE_NAME" \
+            --boot-volume-size-in-gbs "$BOOT_VOLUME_GB" \
+            --no-retry \
+            --output json 2>&1)
+
+          OCI_EXIT=$?
+
+          set -e
+
+
+          # ==================================================
+          # SUCCESS
+          # ==================================================
+
+          if [ "$OCI_EXIT" -eq 0 ]; then
+
+            INSTANCE_ID=$(echo "$OCI_OUTPUT" |
+              jq -r '.data.id // empty')
+
+            INSTANCE_STATE=$(echo "$OCI_OUTPUT" |
+              jq -r '.data."lifecycle-state" // empty')
+
+
+            if [ -n "$INSTANCE_ID" ]; then
+
+              echo ""
+              echo "##########################################"
+              echo "       A1 BATAM BERHASIL DIDAPAT!"
+              echo "##########################################"
+              echo ""
+              echo "OCID  : $INSTANCE_ID"
+              echo "State : $INSTANCE_STATE"
+
+              echo "result=created" >> "$GITHUB_OUTPUT"
+              echo "stop_workflow=true" >> "$GITHUB_OUTPUT"
+              echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+              echo "instance_state=$INSTANCE_STATE" >> "$GITHUB_OUTPUT"
+
+              exit 0
+            fi
+          fi
+
+
+          # ==================================================
+          # OUT OF HOST CAPACITY
+          # ==================================================
+
+          if echo "$OCI_OUTPUT" |
+            grep -Eqi \
+            'OutOfHostCapacity|Out of host capacity|OutOfCapacity|Out of capacity'
+          then
+
+            echo ""
+            echo "Batam masih OUT OF CAPACITY."
+            echo "GitHub Actions akan mencoba lagi pada schedule berikutnya."
+
+            echo "result=capacity" >> "$GITHUB_OUTPUT"
+            echo "stop_workflow=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+
+          # ==================================================
+          # RATE LIMIT
+          # ==================================================
+
+          if echo "$OCI_OUTPUT" |
+            grep -Eqi \
+            'TooManyRequests|HTTP 429|"status"[[:space:]]*:[[:space:]]*429'
+          then
+
+            echo ""
+            echo "OCI rate limit."
+
+            echo "result=rate_limit" >> "$GITHUB_OUTPUT"
+            echo "stop_workflow=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+
+          # ==================================================
+          # ERROR LAIN
+          # ==================================================
+
+          echo ""
+          echo "=========================================="
+          echo "UNEXPECTED OCI ERROR"
+          echo "=========================================="
+          echo "$OCI_OUTPUT"
+
+          echo "result=error" >> "$GITHUB_OUTPUT"
+          echo "stop_workflow=false" >> "$GITHUB_OUTPUT"
+
+          exit 0
+
+
+      # ======================================================
+      # DISCORD - SUCCESS
+      # ======================================================
+
+      - name: Discord - VM Created
+        if: steps.create_vm.outputs.result == 'created'
+        shell: bash
+        run: |
+          MESSAGE=$(cat <<EOF
+          🎉 **OCI A1 BATAM BERHASIL DIDAPAT!**
+
+          **Instance:** \`$INSTANCE_NAME\`
+          **Region:** \`$OCI_CLI_REGION\`
+          **Shape:** \`$SHAPE\`
+          **OCPU:** \`$OCPUS\`
+          **RAM:** \`$MEMORY_GB GB\`
+          **State:** \`${{ steps.create_vm.outputs.instance_state }}\`
+
+          Catcher akan dihentikan otomatis.
+
+          GitHub:
+          https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+
+          jq -n \
+            --arg content "$MESSAGE" \
+            '{content:$content}' |
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$DISCORD_WEBHOOK_URL"
+
+
+      # ======================================================
+      # DISCORD - INSTANCE SUDAH ADA
+      # ======================================================
+
+      - name: Discord - Instance Already Exists
+        if: steps.create_vm.outputs.result == 'exists'
+        shell: bash
+        run: |
+          MESSAGE=$(cat <<EOF
+          ✅ **OCI instance sudah ditemukan**
+
+          **Instance:** \`$INSTANCE_NAME\`
+          **State:** \`${{ steps.create_vm.outputs.instance_state }}\`
+
+          Catcher akan dihentikan otomatis.
+          EOF
+          )
+
+          jq -n \
+            --arg content "$MESSAGE" \
+            '{content:$content}' |
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$DISCORD_WEBHOOK_URL"
+
+
+      # ======================================================
+      # DISCORD - UNEXPECTED ERROR
+      # ======================================================
+
+      - name: Discord - Unexpected Error
+        if: steps.create_vm.outputs.result == 'error'
+        shell: bash
+        run: |
+          MESSAGE=$(cat <<EOF
+          ⚠️ **OCI A1 Catcher mengalami error**
+
+          **Instance:** \`$INSTANCE_NAME\`
+          **Region:** \`$OCI_CLI_REGION\`
+
+          Silakan cek GitHub Actions log:
+
+          https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+
+          jq -n \
+            --arg content "$MESSAGE" \
+            '{content:$content}' |
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$DISCORD_WEBHOOK_URL"
+
+
+      # ======================================================
+      # AUTO DISABLE SETELAH INSTANCE DITEMUKAN / BERHASIL
+      # ======================================================
+
+      - name: Disable Catcher Workflow
+        if: steps.create_vm.outputs.stop_workflow == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          echo "Instance sudah ada."
+          echo "Men-disable scheduled workflow..."
+
+          curl -fsSL \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/create-vm.yml/disable"
+
+          echo "Workflow disabled."
