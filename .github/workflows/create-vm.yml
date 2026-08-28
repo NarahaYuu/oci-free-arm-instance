@@ -29,6 +29,7 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  OCI_CLI_PASSPHRASE: ${{ secrets.OCI_CLI_PASSPHRASE }}
 
   # Instance
   INSTANCE_NAME: "nyuu"
@@ -115,6 +116,7 @@ jobs:
           tenancy=$OCI_CLI_TENANCY
           fingerprint=$OCI_CLI_FINGERPRINT
           key_file=$HOME/.oci/oci_api_key.pem
+          pass_phrase=$OCI_CLI_PASSPHRASE
           region=$OCI_CLI_REGION
           EOF
 
