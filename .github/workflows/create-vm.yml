@@ -3,9 +3,6 @@ name: OCI A1 Batam Capacity Catcher
 # Coba setiap 5 menit.
 # 2-57/5 menghindari menit 00 yang sering lebih ramai di GitHub Actions.
 on:
-  schedule:
-    - cron: "*/5 * * * *"
-
   # Bisa dites manual dari tab Actions
   workflow_dispatch:
 
